@@ -8,6 +8,7 @@ Created on Thu Nov 27 02:26:43 2025
 import numpy as np
 import os
 from NewExperimenter import Experimenter
+from copy import deepcopy
 
 Galileo = Experimenter()
 
@@ -390,11 +391,79 @@ params['green_priority'] = {
     'electricity_rows': ['P3', 'P4', 'P12'],
 }
 
-# 6) Run simulazione
-# -----------------------------
+# ==============================================================================
+# 5b) FASE A — AI Labor-Augmenting Shock
+# ==============================================================================
+# Riduzione progressiva e settoriale di labor_tech_coeff.
+# Canale teorico: Acemoglu (2025), Trammell & Korinek (2025) — production automation.
+#
+# reduction[j] = riduzione relativa massima del coefficiente tecnico del lavoro
+# per la KAU j.  Esempio: 0.30 → a regime labor_tech_coeff sarà il 70% del baseline.
+#
+# Valori calibrati su esposizione settoriale AI (Eloundou et al. 2023 / Anthropic
+# Economic Index 2025):
+#   - Servizi ad alto contenuto informativo (P9, P11, P14, P15): esposizione alta → 25-40%
+#   - Manifattura avanzata (P1, P2, P5, P6): esposizione media → 10-20%
+#   - Energia/utilities (P3, P4, P12): esposizione bassa → 5%
+#   - Estrattivo/agricoltura (P7, P8, P10, P13): esposizione bassa → 5-10%
+# ==============================================================================
+
+ai_labor_reduction = np.array([
+    0.15,   # P1  — Manifattura base
+    0.15,   # P2  — Manifattura chimica
+    0.05,   # P3  — Eolico (energia)
+    0.05,   # P4  — Solare (energia)
+    0.10,   # P5  — Costruzioni
+    0.20,   # P6  — Trasporti
+    0.10,   # P7  — Commercio all'ingrosso
+    0.10,   # P8  — Commercio al dettaglio
+    0.35,   # P9  — Servizi ICT e finanziari
+    0.10,   # P10 — Immobiliare
+    0.30,   # P11 — Servizi professionali e tecnici
+    0.05,   # P12 — Energia tradizionale
+    0.05,   # P13 — Estrattivo
+    0.25,   # P14 — Pubblica amministrazione e istruzione
+    0.40,   # P15 — Servizi vari (alta componente informativa)
+], dtype=float)
+
+params['ai_labor_shock'] = {
+    'active':      True,                # False per disattivare (retrocompatibilità)
+    'shock_start': 5,                   # step in cui inizia la riduzione
+    'shock_end':   45,                  # step in cui la riduzione è completa
+    'reduction':   ai_labor_reduction,  # array (n_sectors,) ∈ [0,1]
+    'floor':       0.0001,              # valore minimo (evita divisione per zero)
+}
+
+# 6) Run simulazione con DUE scenari: CON e SENZA labor shock
+# ---------------------------------------------------------------
 n_steps = 50
 
-results = exp.execute_single_scenario(params, n_steps, folder_path="Experiments/Calcolo_finale")
+# Scenario 1: CON labor shock attivo
+print("\n" + "="*80)
+print("SCENARIO 1: CON AI Labor Shock (active=True)")
+print("="*80)
+params_with_labor = deepcopy(params)
+params_with_labor['ai_labor_shock']['active'] = True
+results_with_labor = exp.execute_single_scenario(
+    params_with_labor, 
+    n_steps, 
+    folder_path="Experiments/Calcolo_finale/Scenario_WITH_LaborShock"
+)
+
+# Scenario 2: SENZA labor shock
+print("\n" + "="*80)
+print("SCENARIO 2: SENZA AI Labor Shock (active=False)")
+print("="*80)
+params_without_labor = deepcopy(params)
+params_without_labor['ai_labor_shock']['active'] = False
+results_without_labor = exp.execute_single_scenario(
+    params_without_labor, 
+    n_steps, 
+    folder_path="Experiments/Calcolo_finale/Scenario_WITHOUT_LaborShock"
+)
+
+# Salva riferimenti ai due risultati
+results = results_with_labor  # per compatibilità con codice esistente
 
 # -----------------------------
 # 7) Controllo GDP

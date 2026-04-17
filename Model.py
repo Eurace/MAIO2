@@ -101,6 +101,7 @@ class MyModel(ap.Model):
         self.params = self.p
         self.shocks_counter = 0
         self._init_green_priority()
+        self._init_ai_labor_shock()       # FASE A: labor-augmenting AI
         
     def initialize_firms(self):
         
@@ -513,6 +514,97 @@ class MyModel(ap.Model):
         # RoW
         _apply_to_dict(self.RoW[0].consumption_shares, 'R')
 
+    # ==================================================================
+    #  FASE A — Labor-augmenting AI shock
+    #  Riduzione progressiva e settoriale di labor_tech_coeff.
+    #  Canale teorico: Acemoglu (2025) task-based automation.
+    #  Pattern: analogo a _update_green_priority (shock graduale).
+    # ==================================================================
+
+    def _init_ai_labor_shock(self):
+        """Prepara le grandezze di base per lo shock AI sul lavoro.
+
+        Parametri attesi in self.p.ai_labor_shock (dict):
+            active          : bool  — attiva/disattiva lo shock
+            shock_start     : int   — step in cui inizia la riduzione
+            shock_end       : int   — step in cui la riduzione raggiunge il massimo
+            reduction       : array-like (nKAUs,) — riduzione MASSIMA relativa di
+                              labor_tech_coeff per ciascuna KAU (es. 0.30 = −30 %)
+            floor           : float (opzionale, default 0.0) — valore minimo
+                              ammissibile di labor_tech_coeff (evita 0 esatto)
+        """
+        cfg = getattr(self.p, 'ai_labor_shock', None)
+        if not cfg or not cfg.get('active', False):
+            self._ai_labor = {'active': False}
+            return
+
+        n = self.p.nKAUs
+
+        # Riduzione massima relativa per KAU (array numpy)
+        red = np.array(cfg.get('reduction', np.zeros(n)), dtype=float)
+        if red.shape[0] != n:
+            raise ValueError(
+                f"ai_labor_shock.reduction ha dimensione {red.shape[0]}, "
+                f"atteso {n}"
+            )
+
+        # Orizzonte temporale
+        s0 = int(cfg.get('shock_start', 0))
+        s1 = int(cfg.get('shock_end', s0))
+        L  = max(1, s1 - s0 + 1)
+
+        # Salva i valori di base (pre-shock)
+        baseline = np.array(
+            [float(lk.labor_tech_coeff) for lk in self.localKAU_agents],
+            dtype=float,
+        )
+
+        self._ai_labor = {
+            'active':      True,
+            'shock_start': s0,
+            'shock_end':   s1,
+            'shock_len':   L,
+            'reduction':   red,           # array (nKAUs,) ∈ [0,1]
+            'baseline':    baseline,       # array (nKAUs,) valori originali
+            'floor':       float(cfg.get('floor', 0.0)),
+        }
+
+    def _update_ai_labor_shock(self):
+        """Aggiorna labor_tech_coeff di ogni KAU in funzione del progresso
+        dello shock AI.  Chiamata all'inizio di Model.step(), PRIMA di
+        form_demand_expectation() e make_plans().
+
+        Logica:
+            labor_tech_coeff_j(t) = baseline_j * (1 − f_t * reduction_j)
+        dove f_t ∈ [0,1] è il fattore di progresso lineare.
+        """
+        cfg = self._ai_labor
+        if not cfg.get('active', False):
+            return
+
+        t  = self.t
+        s0 = cfg['shock_start']
+        s1 = cfg['shock_end']
+        L  = cfg['shock_len']
+
+        # Fattore di progresso (identico alla logica green priority)
+        if t < s0:
+            f = 0.0
+        elif t >= s1 + 1:
+            f = 1.0
+        else:
+            f = max(0.0, min(1.0, (t - s0 + 1) / L))
+
+        cfg['f_t'] = f          # salva per eventuale recording
+
+        baseline  = cfg['baseline']
+        reduction = cfg['reduction']
+        floor     = cfg['floor']
+
+        for j, lk in enumerate(self.localKAU_agents):
+            new_val = baseline[j] * (1.0 - f * reduction[j])
+            lk.labor_tech_coeff = max(floor, new_val)
+
     def _agents_with_consumption_budgets(self):
         # Ritorna gli agenti che hanno un dict 'consumption_budgets'
         holders = []
@@ -687,6 +779,7 @@ class MyModel(ap.Model):
             return vals
     
         self._update_green_priority()
+        self._update_ai_labor_shock()     # FASE A: aggiorna labor_tech_coeff
         
         self.localKAU_agents.form_demand_expectation()
         
@@ -1094,6 +1187,25 @@ class MyModel(ap.Model):
         for lk in self.localKAU_agents:
             lk.record('no_employees', len(lk.employees_list))
         
+        # --- FASE A: recording variabili AI labor-augmenting ---
+        for lk in self.localKAU_agents:
+            lk.record('labor_tech_coeff', lk.labor_tech_coeff)
+        
+        ai_cfg = getattr(self, '_ai_labor', {})
+        if ai_cfg.get('active', False):
+            self.record('ai_labor_f_t', float(ai_cfg.get('f_t', 0.0)))
+            # labor_tech_coeff medio ponderato (pesato per produzione)
+            tot_prod = sum(max(0.0, lk.production) for lk in self.localKAU_agents)
+            if tot_prod > 0:
+                avg_ltc = sum(
+                    lk.labor_tech_coeff * max(0.0, lk.production)
+                    for lk in self.localKAU_agents
+                ) / tot_prod
+            else:
+                avg_ltc = float(np.mean([lk.labor_tech_coeff for lk in self.localKAU_agents]))
+            self.record('avg_labor_tech_coeff', avg_ltc)
+        # --- fine recording Fase A ---
+
         for lk in self.localKAU_agents:
             for com in self.p.commodities_list:
                 lk.record(com+' stock', lk.commodities_stock[com])
